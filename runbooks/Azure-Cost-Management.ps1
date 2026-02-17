@@ -36,6 +36,7 @@ $ErrorActionPreference = 'Stop'
 $VerbosePreference = 'Continue'
 
 # Storage configuration
+$ResourceGroupName = 'DataAPIBuilder'
 $StorageAccountName = 'datapibuilderdemo'
 $ContainerName = 'json'
 $ReportPrefix = 'vm-cost-analysis'
@@ -183,13 +184,20 @@ try {
     # Convert data to JSON
     $JsonOutput = $AllVMData | ConvertTo-Json -Depth 10
 
-    # Get storage account
+    # Get storage account - try specific resource group first, then search all
     Write-Output "Retrieving storage account: $StorageAccountName"
-    $StorageAccount = Get-AzStorageAccount | Where-Object { $_.StorageAccountName -eq $StorageAccountName }
+    $StorageAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
 
     if (-not $StorageAccount) {
-        throw "Storage account '$StorageAccountName' not found"
+        Write-Output "  Not found in resource group '$ResourceGroupName', searching all resource groups..."
+        $StorageAccount = Get-AzStorageAccount | Where-Object { $_.StorageAccountName -eq $StorageAccountName } | Select-Object -First 1
     }
+
+    if (-not $StorageAccount) {
+        throw "Storage account '$StorageAccountName' not found in any accessible resource group"
+    }
+
+    Write-Output "  Found in resource group: $($StorageAccount.ResourceGroupName)"
 
     # Get storage context
     $StorageContext = $StorageAccount.Context
