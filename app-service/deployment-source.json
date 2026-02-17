@@ -1,0 +1,16 @@
+{
+  "branch": null,
+  "deploymentRollbackEnabled": false,
+  "gitHubActionConfiguration": null,
+  "id": "/subscriptions/424d0f78-5980-4d31-98ec-624616db8e74/resourceGroups/DataAPIBuilder/providers/Microsoft.Web/sites/vmsizesazure/sourcecontrols/web",
+  "isGitHubAction": false,
+  "isManualIntegration": false,
+  "isMercurial": false,
+  "kind": null,
+  "location": "East US",
+  "name": "vmsizesazure",
+  "repoUrl": null,
+  "resourceGroup": "DataAPIBuilder",
+  "tags": {},
+  "type": "Microsoft.Web/sites/sourcecontrols"
+}

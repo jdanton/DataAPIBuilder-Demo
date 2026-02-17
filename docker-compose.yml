@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  data-api-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.alternative
+    container_name: vmsizes-api
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - DATABASE_CONNECTION_STRING=Server=tcp:dataapibuilderdemo.database.windows.net,1433;Database=VMSizes;Authentication=Active Directory Default;
+      # For local development with SQL Server:
+      # - DATABASE_CONNECTION_STRING=Server=sqlserver;Database=VMSizes;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True;
+    volumes:
+      - ./dab-config.json:/App/dab-config.json:ro
+    depends_on:
+      - sqlserver
+    networks:
+      - dataapi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Local SQL Server for development
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: vmsizes-sql
+    ports:
+      - "1433:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=YourStrong@Passw0rd
+      - MSSQL_PID=Developer
+    volumes:
+      - sqldata:/var/opt/mssql
+      - ./sql/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - dataapi-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P YourStrong@Passw0rd -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+networks:
+  dataapi-network:
+    driver: bridge
+
+volumes:
+  sqldata:
+    driver: local

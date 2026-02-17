@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+LICENSE
+
+# Build artifacts
+bin/
+obj/
+out/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Azure CLI
+.azure/
+
+# Exported configs (don't include in container)
+runbooks/
+logic-apps/
+sql/
+app-service/
+bicep/
+azure-resources-export.json
+resources-list.json
+*.ps1
+automation.ps1
+
+# Sensitive files
+*.pfx
+*.key
+appsettings.Development.json

@@ -1,0 +1,277 @@
+{
+  "$schema": "https://github.com/Azure/data-api-builder/releases/latest/download/dab.draft.schema.json",
+  "data-source": {
+    "database-type": "mssql",
+    "connection-string": "@env('DATABASE_CONNECTION_STRING')",
+    "options": {
+      "set-session-context": false
+    }
+  },
+  "runtime": {
+    "rest": {
+      "enabled": true,
+      "path": "/api",
+      "request-body-strict": true
+    },
+    "graphql": {
+      "enabled": true,
+      "path": "/graphql",
+      "allow-introspection": true
+    },
+    "host": {
+      "cors": {
+        "origins": ["*"],
+        "allow-credentials": false
+      },
+      "authentication": {
+        "provider": "StaticWebApps"
+      },
+      "mode": "production"
+    }
+  },
+  "entities": {
+    "VMSize": {
+      "source": {
+        "object": "dbo.VMSizes",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "VMSize",
+          "plural": "VMSizes"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/vmsizes"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "VMSizeID": "VMSizeID",
+        "VMSizeName": "VMSizeName",
+        "FamilyID": "FamilyID",
+        "vCPUs": "vCPUs",
+        "MemoryGB": "MemoryGB",
+        "TempStorageGB": "TempStorageGB",
+        "MaxDataDisks": "MaxDataDisks",
+        "MaxNICs": "MaxNICs",
+        "AcceleratedNetworkingEnabled": "AcceleratedNetworkingEnabled",
+        "PremiumIOSupported": "PremiumIOSupported",
+        "EphemeralOSDiskSupported": "EphemeralOSDiskSupported",
+        "IsActive": "IsActive",
+        "CreatedDate": "CreatedDate",
+        "UpdatedDate": "UpdatedDate"
+      }
+    },
+    "VMSizeWithPricing": {
+      "source": {
+        "object": "dbo.vw_VMSizesWithPricing",
+        "type": "view"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "VMSizeWithPrice",
+          "plural": "VMSizesWithPricing"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/vmsizes-pricing"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "VMSizeID": "VMSizeID",
+        "VMSizeName": "VMSizeName",
+        "FamilyCode": "FamilyCode",
+        "FamilyName": "FamilyName",
+        "vCPUs": "vCPUs",
+        "MemoryGB": "MemoryGB",
+        "TempStorageGB": "TempStorageGB",
+        "MaxDataDisks": "MaxDataDisks",
+        "MaxNICs": "MaxNICs",
+        "AcceleratedNetworkingEnabled": "AcceleratedNetworkingEnabled",
+        "PremiumIOSupported": "PremiumIOSupported",
+        "EphemeralOSDiskSupported": "EphemeralOSDiskSupported",
+        "RegionName": "RegionName",
+        "RegionDisplayName": "RegionDisplayName",
+        "Geography": "Geography",
+        "LinuxPricePerHour": "LinuxPricePerHour",
+        "LinuxPricePerMonth": "LinuxPricePerMonth",
+        "CurrencyCode": "CurrencyCode",
+        "CurrencySymbol": "CurrencySymbol",
+        "EstimatedAnnualCost": "EstimatedAnnualCost",
+        "PricePerCPU": "PricePerCPU",
+        "PricePerGB": "PricePerGB"
+      }
+    },
+    "Region": {
+      "source": {
+        "object": "dbo.AzureRegions",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "Region",
+          "plural": "Regions"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/regions"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "RegionID": "RegionID",
+        "RegionName": "RegionName",
+        "DisplayName": "DisplayName",
+        "RegionType": "RegionType",
+        "Geography": "Geography",
+        "PairedRegion": "PairedRegion",
+        "IsActive": "IsActive"
+      }
+    },
+    "VMFamily": {
+      "source": {
+        "object": "dbo.VMFamilies",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "VMFamily",
+          "plural": "VMFamilies"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/families"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "FamilyID": "FamilyID",
+        "FamilyCode": "FamilyCode",
+        "FamilyName": "FamilyName",
+        "Description": "Description",
+        "UseCase": "UseCase"
+      }
+    },
+    "Pricing": {
+      "source": {
+        "object": "dbo.VMPricing",
+        "type": "table"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "Price",
+          "plural": "Prices"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/pricing"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "PriceID": "PriceID",
+        "VMSizeID": "VMSizeID",
+        "RegionID": "RegionID",
+        "PricingModelID": "PricingModelID",
+        "CurrencyID": "CurrencyID",
+        "PricePerHour": "PricePerHour",
+        "PricePerMonth": "PricePerMonth",
+        "PricePerYear": "PricePerYear",
+        "OperatingSystem": "OperatingSystem",
+        "EffectiveDate": "EffectiveDate",
+        "ExpiryDate": "ExpiryDate"
+      }
+    },
+    "PriceComparison": {
+      "source": {
+        "object": "dbo.vw_PriceComparisonByRegion",
+        "type": "view"
+      },
+      "graphql": {
+        "enabled": true,
+        "type": {
+          "singular": "PriceComparison",
+          "plural": "PriceComparisons"
+        }
+      },
+      "rest": {
+        "enabled": true,
+        "path": "/price-comparison"
+      },
+      "permissions": [
+        {
+          "role": "anonymous",
+          "actions": [
+            {
+              "action": "read"
+            }
+          ]
+        }
+      ],
+      "mappings": {
+        "VMSizeName": "VMSizeName",
+        "vCPUs": "vCPUs",
+        "MemoryGB": "MemoryGB",
+        "RegionName": "RegionName",
+        "Geography": "Geography",
+        "PricePerMonth": "PricePerMonth",
+        "OperatingSystem": "OperatingSystem",
+        "PricingModel": "PricingModel",
+        "CurrencyCode": "CurrencyCode",
+        "EffectiveDate": "EffectiveDate"
+      }
+    }
+  }
+}

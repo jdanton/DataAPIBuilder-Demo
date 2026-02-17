@@ -1,0 +1,61 @@
+# Deployment logs
+deployment-*.log
+*.log
+
+# Backup files
+*.bak
+*.backup
+*~
+backups/*.log
+
+# Database artifacts
+*.dacpac
+*.bacpac
+
+# SQL Server files
+*.mdf
+*.ldf
+
+# Azure export artifacts
+azure-resources-export.json
+resources-list.json
+*-config.json
+!dab-config*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Temporary files
+*.tmp
+.cache/
+
+# Secrets
+*.env
+*.env.local
+secrets.json
+credentials.json
+
+# Schema extraction artifacts
+schema-columns.json
+schema-info.csv
+model.xml
+*-extracted-schema.sql
+extract-schema.py
+extract-full-schema.py

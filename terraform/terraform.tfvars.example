@@ -1,0 +1,55 @@
+# Azure Region
+location = "eastus"
+
+# Environment (dev, staging, or prod)
+environment = "prod"
+
+# Resource Group
+resource_group_name = "DataAPIBuilder"
+
+# Azure Subscription ID
+subscription_id = "your-subscription-id-here"
+
+# SQL Server Configuration
+sql_admin_username      = "CloudSA090090fe"
+sql_admin_password      = "your-strong-password-here"  # Use Azure Key Vault or environment variable in production
+sql_aad_admin_login     = "Joey"
+sql_aad_admin_object_id = "your-aad-admin-object-id"
+
+# Client IP Addresses (for SQL Server firewall)
+# Add your client IPs here
+allowed_client_ips = [
+  # "1.2.3.4",
+  # "5.6.7.8"
+]
+
+# Resource Names (use defaults or customize)
+automation_account_name   = "VMSizes"
+sql_server_name          = "dataapibuilderdemo"
+sql_database_name        = "VMSizes"
+storage_account_name     = "datapibuilderdemo"
+container_registry_name  = "dataapibuilderdemojd"
+app_service_plan_name    = "ASP-DataAPIBuilder-a8e9"
+web_app_name             = "vmsizesazure"
+logic_app_name           = "VMSizesLogicApp"
+public_ip_name           = "appgw-pip-datapibuilder"
+waf_policy_name          = "DemoAppGW-WAF-Policy"
+
+# SKUs and Sizes
+sql_database_sku         = "S0"
+sql_database_max_size_gb = 250
+storage_account_tier     = "Standard"
+storage_account_replication_type = "LRS"
+file_share_quota_gb      = 10
+app_service_plan_sku     = "B1"
+container_registry_sku   = "Standard"
+
+# Container Image
+dab_image_tag = "latest"
+
+# Tags
+tags = {
+  Environment = "Production"
+  ManagedBy   = "Terraform"
+  Project     = "DataAPIBuilder"
+}

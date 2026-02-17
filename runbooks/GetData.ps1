@@ -35,7 +35,7 @@ foreach ($region in $regions)
 {
 
 #Demo this--to show Azure geolcations and region    
-$VMs = Get-AzComputeResourceSku -Location $region | Where-Object { $_.ResourceType -eq 'virtualmachines’ }
+$VMs = Get-AzComputeResourceSku -Location $region | Where-Object { $_.ResourceType -eq 'virtualmachinesâ€™ }
  
 $Results = foreach ($VM in $VMs) {
  
@@ -73,5 +73,6 @@ $time=$(((get-date).ToUniversalTime()).ToString("yyyyMMddTHHmmssZ"))
 $container = Get-AzStorageContainer -Name "status" -Context $context
 $content = [system.Text.Encoding]::UTF8.GetBytes($Completed)
 $container.CloudBlobContainer.GetBlockBlobReference("completed$time.txt").UploadFromByteArray($content,0,$content.Length)
+
 
 

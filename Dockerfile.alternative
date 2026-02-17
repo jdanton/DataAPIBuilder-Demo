@@ -1,0 +1,21 @@
+# Alternative Dockerfile using pre-built Data API Builder image
+# This uses the official Microsoft container image
+
+FROM mcr.microsoft.com/azure-databases/data-api-builder:latest
+
+# Copy your configuration file
+COPY dab-config.json /App/dab-config.json
+
+# Set working directory
+WORKDIR /App
+
+# Expose ports
+EXPOSE 5000
+EXPOSE 5001
+
+# Environment variables for Azure SQL connection
+ENV DATABASE_CONNECTION_STRING=""
+ENV ASPNETCORE_ENVIRONMENT=Production
+
+# The base image already has the entrypoint configured
+# It will automatically use dab-config.json in /App directory
