@@ -1,1007 +1,275 @@
 <#
 .SYNOPSIS
-    Azure Cost Optimization Runbook â€” aggressively reduces spend across all accessible subscriptions.
+    VM Cost Analysis Runbook - analyzes and reports VM costs across subscriptions.
 
 .DESCRIPTION
-    Connects via the Automation Account's system-assigned managed identity and performs the
-    following actions across every subscription the identity can reach:
+    Connects via the Automation Account's system-assigned managed identity and analyzes
+    Virtual Machine costs across all accessible subscriptions.
 
-    PAUSE / STOP  (reversible)
-      â€¢ Microsoft Fabric capacities            (REST API suspend)
-      â€¢ Synapse Analytics dedicated SQL pools   (Suspend-AzSynapseSqlPool)
-      â€¢ Azure SQL Managed Instances             (Stop-AzSqlInstance â€” GP tier only)
-      â€¢ Azure Analysis Services servers         (Suspend-AzAnalysisServicesServer)
-      â€¢ Azure Data Explorer (Kusto) clusters    (Stop-AzKustoCluster)
-      â€¢ Application Gateways                    (Stop-AzApplicationGateway)
-      â€¢ Virtual Machines  (opt-in)              (Stop-AzVM -Force)
+    Scope: VMs ONLY (aligned with DataAPIBuilder VM sizing and pricing focus)
 
-    DEALLOCATE  (reversible â€” public IP may change)
-      â€¢ Azure Firewalls                         (Deallocate + Set-AzFirewall)
+    ANALYSIS:
+      - Running VM costs by SKU, region, and subscription
+      - VM power state analysis (running vs stopped/deallocated)
+      - Cost optimization opportunities (oversized VMs, stopped but allocated)
+      - VM family cost comparisons
 
-    SCALE DOWN  (reversible)
-      â€¢ Azure SQL Databases â†’ Basic (â‰¤ 2 GB) or S0 (> 2 GB)
-
-    DELETE  (irreversible âš ï¸�)
-      â€¢ Detached managed disks                  (ManagedBy -eq $null)
-      â€¢ Orphaned snapshots whose source disk no longer exists
-      â€¢ Unattached public IP addresses          (IpConfiguration -eq $null)
-      â€¢ Azure Virtual WANs  (opt-in)            (hubs, gateways, connections removed first)
-
-    AUDIT / WARN
-      â€¢ Long-term backup retention policies (LTR) on SQL databases
-      â€¢ Geo-redundant backup storage on SQL databases / MIs
-      â€¢ Cosmos DB containers with high provisioned RU/s
-      â€¢ Premium / Enterprise Redis Cache instances
-      â€¢ ExpressRoute circuits
-      â€¢ VPN Gateways
-      â€¢ Bastion Hosts
-      â€¢ NAT Gateways
-      â€¢ Standard Load Balancers
-      â€¢ AKS clusters (node pools with many nodes)
-      â€¢ HDInsight / Databricks clusters
-      â€¢ Large Log Analytics workspace retention settings
-      â€¢ Running Container Instances
-
-    â•”â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•—
-    â•‘  âš ï¸�  WARNING â€” THIS RUNBOOK IS DESTRUCTIVE                        â•‘
-    â•‘  DO NOT RUN AGAINST PRODUCTION ENVIRONMENTS.                      â•‘
-    â•‘  Always execute with -DryRun $true first and review the output.   â•‘
-    â•šâ•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�
-
-.PARAMETER DryRun
-    When $true (the DEFAULT), no changes are made â€” the runbook only reports what it
-    would do. Set to $false to execute changes.
-
-.PARAMETER IncludeVmDeallocation
-    When $true, running VMs are deallocated. Default $false â€” VMs are only reported.
-
-.PARAMETER IncludeVirtualWanDeletion
-    When $true, Virtual WANs (and child hubs / gateways) are deleted. Default $false.
-
-.PARAMETER ExcludeSubscriptionIds
-    Array of subscription IDs to skip entirely.
-
-.PARAMETER ExcludeResourceGroups
-    Array of resource group names to skip (case-insensitive).
-
-.PARAMETER ProductionKeywords
-    If any of these keywords appear in a subscription name, resource group name, or
-    resource tags, the runbook will SKIP that scope and log a production warning.
+    OUTPUT:
+      - JSON reports stored in blob storage (json container)
+      - Summary statistics and recommendations
+      - Integration with VMSizes database for cost trends
 
 .NOTES
-    Required Automation Account modules (import via Modules blade):
-        Az.Accounts  Az.Resources  Az.Sql  Az.Synapse  Az.Network
-        Az.Compute   Az.Kusto      Az.AnalysisServices  Az.Monitor
-        Az.CosmosDB  Az.Aks
-
-    The managed identity needs at minimum Contributor on each target subscription.
-
-    Version : 2.0
+    Author:     DataAPIBuilder Project
+    Purpose:    VM-specific cost analysis and optimization
+    Runtime:    PowerShell 7.2
+    Schedule:   Daily (Nightly VM Cost Analysis)
 #>
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# PARAMETERS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-param(
-    [Parameter(Mandatory = $false)]
-    [bool]$DryRun = $true,
+#Requires -Modules Az.Accounts, Az.Compute, Az.Storage
 
-    [Parameter(Mandatory = $false)]
-    [bool]$IncludeVmDeallocation = $false,
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-    [Parameter(Mandatory = $false)]
-    [bool]$IncludeVirtualWanDeletion = $false,
+$ErrorActionPreference = 'Stop'
+$VerbosePreference = 'Continue'
 
-    [Parameter(Mandatory = $false)]
-    [string[]]$ExcludeSubscriptionIds = @(),
+# Storage configuration
+$StorageAccountName = 'datapibuilderdemo'
+$ContainerName = 'json'
+$ReportPrefix = 'vm-cost-analysis'
 
-    [Parameter(Mandatory = $false)]
-    [string[]]$ExcludeResourceGroups = @(),
+# Note: Future enhancement could integrate with VMSizes database
+# to track VM cost trends over time
 
-    [Parameter(Mandatory = $false)]
-    [string[]]$ProductionKeywords = @("prod", "production", "prd", "live")
-)
+# ============================================================================
+# AUTHENTICATION
+# ============================================================================
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# GLOBAL STATE
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-$ErrorActionPreference = "Continue"
-$script:ActionsTaken   = [System.Collections.Generic.List[string]]::new()
-$script:Warnings       = [System.Collections.Generic.List[string]]::new()
-$script:Errors         = [System.Collections.Generic.List[string]]::new()
-$script:SkippedProd    = [System.Collections.Generic.List[string]]::new()
+Write-Output "=== VM Cost Analysis Runbook Started ==="
+Write-Output "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# HELPER FUNCTIONS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Disable context autosave
+$null = Disable-AzContextAutosave -Scope Process
 
-function Write-Log {
-    param(
-        [string]$Message,
-        [ValidateSet("INFO","WARN","ERROR","ACTION","SKIP","AUDIT")]
-        [string]$Level = "INFO"
-    )
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $prefix = switch ($Level) {
-        "INFO"   { "[INFO]   " }
-        "WARN"   { "[âš  WARN] " }
-        "ERROR"  { "[â�Œ ERROR]" }
-        "ACTION" { "[âœ… ACTION]" }
-        "SKIP"   { "[â�­ SKIP] " }
-        "AUDIT"  { "[ğŸ”� AUDIT]" }
-    }
-    $line = "$ts $prefix $Message"
-    Write-Output $line
-
-    switch ($Level) {
-        "WARN"   { $script:Warnings.Add($Message) }
-        "ERROR"  { $script:Errors.Add($Message) }
-        "ACTION" { $script:ActionsTaken.Add($Message) }
-    }
-}
-
-function Test-IsExcludedResourceGroup {
-    param([string]$ResourceGroupName)
-    foreach ($excluded in $ExcludeResourceGroups) {
-        if ($ResourceGroupName -ieq $excluded) { return $true }
-    }
-    return $false
-}
-
-function Test-ProductionIndicators {
-    <#
-        Returns $true if any production keyword is found in the supplied strings
-        or in tag values. Callers should SKIP the resource/scope when this returns $true.
-    #>
-    param(
-        [string[]]$NamesToCheck,
-        [hashtable]$Tags = @{}
-    )
-    $searchSpace = @($NamesToCheck)
-    if ($Tags) {
-        $searchSpace += $Tags.Values | ForEach-Object { "$_" }
-        $searchSpace += $Tags.Keys   | ForEach-Object { "$_" }
-    }
-    foreach ($name in $searchSpace) {
-        foreach ($kw in $ProductionKeywords) {
-            if ($name -imatch [regex]::Escape($kw)) { return $true }
-        }
-    }
-    return $false
-}
-
-function Invoke-ActionOrDryRun {
-    <#
-        Wraps every mutating operation. In DryRun mode the ScriptBlock is NOT executed.
-    #>
-    param(
-        [string]$Description,
-        [scriptblock]$Action
-    )
-    if ($DryRun) {
-        Write-Log "[DRY RUN] Would: $Description" -Level ACTION
-    } else {
-        try {
-            Write-Log "Executing: $Description" -Level ACTION
-            & $Action
-        } catch {
-            Write-Log "Failed â€” $Description â€” $_" -Level ERROR
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 1.  FABRIC CAPACITIES  (REST API â€” no native cmdlet yet)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-PauseFabricCapacities {
-    Write-Log "â”€â”€ Checking Microsoft Fabric capacities â”€â”€"
-    $caps = Get-AzResource -ResourceType "Microsoft.Fabric/capacities" -ErrorAction SilentlyContinue
-    if (-not $caps) { Write-Log "No Fabric capacities found." ; return }
-
-    foreach ($cap in $caps) {
-        if (Test-IsExcludedResourceGroup $cap.ResourceGroupName) {
-            Write-Log "Skipping Fabric capacity $($cap.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($cap.Name, $cap.ResourceGroupName) -Tags ($cap.Tags ?? @{})) {
-            Write-Log "Skipping Fabric capacity $($cap.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("Fabric:$($cap.Name)") ; continue
-        }
-
-        # Read current state via REST
-        $getUri = "$($cap.ResourceId)?api-version=2023-11-01"
-        try {
-            $detail = Invoke-AzRestMethod -Path $getUri -Method GET -ErrorAction Stop
-            $body   = $detail.Content | ConvertFrom-Json
-            $state  = $body.properties.state
-        } catch {
-            Write-Log "Unable to read state for Fabric capacity $($cap.Name): $_" -Level ERROR ; continue
-        }
-
-        if ($state -ieq "Active") {
-            Invoke-ActionOrDryRun -Description "Suspend Fabric capacity $($cap.Name) (RG: $($cap.ResourceGroupName))" -Action {
-                $suspendUri = "$($cap.ResourceId)/suspend?api-version=2023-11-01"
-                $result = Invoke-AzRestMethod -Path $suspendUri -Method POST -ErrorAction Stop
-                if ($result.StatusCode -notin 200,202) {
-                    throw "HTTP $($result.StatusCode): $($result.Content)"
-                }
-            }
-        } else {
-            Write-Log "Fabric capacity $($cap.Name) already in state '$state'." -Level SKIP
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 2.  AZURE SQL DATABASES â€” scale to Basic (â‰¤2 GB) or S0
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-ScaleDownSqlDatabases {
-    Write-Log "â”€â”€ Checking Azure SQL Databases â”€â”€"
-    $servers = Get-AzSqlServer -ErrorAction SilentlyContinue
-    if (-not $servers) { Write-Log "No SQL servers found." ; return }
-
-    foreach ($srv in $servers) {
-        if (Test-IsExcludedResourceGroup $srv.ResourceGroupName) {
-            Write-Log "Skipping SQL server $($srv.ServerName) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($srv.ServerName, $srv.ResourceGroupName) -Tags ($srv.Tags ?? @{})) {
-            Write-Log "Skipping SQL server $($srv.ServerName) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("SqlServer:$($srv.ServerName)") ; continue
-        }
-
-        $dbs = Get-AzSqlDatabase -ServerName $srv.ServerName -ResourceGroupName $srv.ResourceGroupName -ErrorAction SilentlyContinue
-        foreach ($db in $dbs) {
-            # Skip system databases and already-optimized tiers
-            if ($db.DatabaseName -eq "master") { continue }
-            $edition = $db.Edition
-            $slo     = $db.CurrentServiceObjectiveName
-
-            # Already at Basic or S0 â€” nothing to do
-            if ($edition -ieq "Basic" -or $slo -ieq "Basic") {
-                Write-Log "SQL DB $($srv.ServerName)/$($db.DatabaseName) already on Basic." -Level SKIP ; continue
-            }
-            if ($slo -ieq "S0") {
-                Write-Log "SQL DB $($srv.ServerName)/$($db.DatabaseName) already on S0." -Level SKIP ; continue
-            }
-
-            # Skip Hyperscale / DataWarehouse â€” cannot trivially scale to DTU
-            if ($edition -iin @("Hyperscale", "DataWarehouse")) {
-                Write-Log "SQL DB $($srv.ServerName)/$($db.DatabaseName) is $edition â€” skipping (manual review needed)." -Level WARN
-                continue
-            }
-
-            # Determine current size to pick Basic vs S0
-            # Basic max = 2 GB (2,147,483,648 bytes).  S0 max = 250 GB.
-            $maxSizeBytes = $db.MaxSizeBytes
-            $currentUsedBytes = 0
-            try {
-                $metrics = Get-AzSqlDatabaseUsage -ServerName $srv.ServerName `
-                               -DatabaseName $db.DatabaseName `
-                               -ResourceGroupName $srv.ResourceGroupName -ErrorAction SilentlyContinue
-                $sizeUsage = $metrics | Where-Object { $_.ResourceName -eq "database_size" -or $_.DisplayName -like "*size*" } | Select-Object -First 1
-                if ($sizeUsage) { $currentUsedBytes = $sizeUsage.CurrentValue }
-            } catch {
-                # If we can't determine size, be safe and choose S0
-                Write-Log "Could not determine size for $($db.DatabaseName), defaulting to S0." -Level WARN
-            }
-
-            # Fallback: if we couldn't get usage, infer from MaxSizeBytes
-            # If MaxSizeBytes > 2 GB the DB was configured for more than Basic allows
-            $basicMaxBytes = 2147483648  # 2 GB
-            if ($currentUsedBytes -gt 0) {
-                $targetEdition = if ($currentUsedBytes -le $basicMaxBytes) { "Basic" } else { "Standard" }
-            } else {
-                $targetEdition = if ($maxSizeBytes -le $basicMaxBytes) { "Basic" } else { "Standard" }
-            }
-            $targetSlo = if ($targetEdition -eq "Basic") { "Basic" } else { "S0" }
-            $sizeInfo  = if ($currentUsedBytes -gt 0) { "$([math]::Round($currentUsedBytes / 1MB, 1)) MB used" } else { "MaxSize=$([math]::Round($maxSizeBytes / 1GB, 1)) GB" }
-
-            Invoke-ActionOrDryRun -Description "Scale SQL DB $($srv.ServerName)/$($db.DatabaseName) from $edition/$slo â†’ $targetEdition/$targetSlo ($sizeInfo)" -Action {
-                Set-AzSqlDatabase -ServerName $srv.ServerName `
-                    -DatabaseName $db.DatabaseName `
-                    -ResourceGroupName $srv.ResourceGroupName `
-                    -Edition $targetEdition `
-                    -RequestedServiceObjectiveName $targetSlo `
-                    -ErrorAction Stop | Out-Null
-            }
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 3.  SYNAPSE DEDICATED SQL POOLS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-PauseSynapsePools {
-    Write-Log "â”€â”€ Checking Synapse Dedicated SQL Pools â”€â”€"
-    $workspaces = Get-AzSynapseWorkspace -ErrorAction SilentlyContinue
-    if (-not $workspaces) { Write-Log "No Synapse workspaces found." ; return }
-
-    foreach ($ws in $workspaces) {
-        if (Test-IsExcludedResourceGroup $ws.ResourceGroupName) {
-            Write-Log "Skipping Synapse workspace $($ws.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($ws.Name, $ws.ResourceGroupName) -Tags ($ws.Tags ?? @{})) {
-            Write-Log "Skipping Synapse workspace $($ws.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("Synapse:$($ws.Name)") ; continue
-        }
-
-        $pools = Get-AzSynapseSqlPool -WorkspaceName $ws.Name -ResourceGroupName $ws.ResourceGroupName -ErrorAction SilentlyContinue
-        foreach ($pool in $pools) {
-            if ($pool.Status -ieq "Online") {
-                Invoke-ActionOrDryRun -Description "Pause Synapse SQL pool $($ws.Name)/$($pool.SqlPoolName)" -Action {
-                    Suspend-AzSynapseSqlPool -WorkspaceName $ws.Name `
-                        -Name $pool.SqlPoolName `
-                        -ResourceGroupName $ws.ResourceGroupName `
-                        -ErrorAction Stop | Out-Null
-                }
-            } else {
-                Write-Log "Synapse pool $($ws.Name)/$($pool.SqlPoolName) status=$($pool.Status)." -Level SKIP
-            }
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 4.  AZURE FIREWALLS â€” deallocate (removes compute cost; config preserved)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-DeallocateFirewalls {
-    Write-Log "â”€â”€ Checking Azure Firewalls â”€â”€"
-    $firewalls = Get-AzFirewall -ErrorAction SilentlyContinue
-    if (-not $firewalls) { Write-Log "No Azure Firewalls found." ; return }
-
-    foreach ($fw in $firewalls) {
-        if (Test-IsExcludedResourceGroup $fw.ResourceGroupName) {
-            Write-Log "Skipping Firewall $($fw.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($fw.Name, $fw.ResourceGroupName) -Tags ($fw.Tag ?? @{})) {
-            Write-Log "Skipping Firewall $($fw.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("Firewall:$($fw.Name)") ; continue
-        }
-
-        # A deallocated firewall has no IP configurations
-        if ($fw.IpConfigurations.Count -eq 0 -and -not $fw.ManagementIpConfiguration) {
-            Write-Log "Firewall $($fw.Name) is already deallocated." -Level SKIP ; continue
-        }
-
-        Invoke-ActionOrDryRun -Description "Deallocate Azure Firewall $($fw.Name) (~`$1.25/hr savings)" -Action {
-            $fw.Deallocate()
-            Set-AzFirewall -AzureFirewall $fw -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 5.  AZURE SQL MANAGED INSTANCES â€” stop (General Purpose only)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-StopSqlManagedInstances {
-    Write-Log "â”€â”€ Checking Azure SQL Managed Instances â”€â”€"
-    $instances = Get-AzSqlInstance -ErrorAction SilentlyContinue
-    if (-not $instances) { Write-Log "No SQL Managed Instances found." ; return }
-
-    foreach ($mi in $instances) {
-        if (Test-IsExcludedResourceGroup $mi.ResourceGroupName) {
-            Write-Log "Skipping MI $($mi.ManagedInstanceName) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($mi.ManagedInstanceName, $mi.ResourceGroupName) -Tags ($mi.Tags ?? @{})) {
-            Write-Log "Skipping MI $($mi.ManagedInstanceName) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("SqlMI:$($mi.ManagedInstanceName)") ; continue
-        }
-
-        if ($mi.Sku.Tier -ine "GeneralPurpose") {
-            Write-Log "MI $($mi.ManagedInstanceName) is $($mi.Sku.Tier) â€” stop/start only supports General Purpose." -Level WARN
-            continue
-        }
-
-        # Check if already stopped by querying state
-        $state = $mi.State
-        if ($state -iin @("Stopped", "Stopping")) {
-            Write-Log "MI $($mi.ManagedInstanceName) is already $state." -Level SKIP ; continue
-        }
-
-        Invoke-ActionOrDryRun -Description "Stop SQL Managed Instance $($mi.ManagedInstanceName) (tier: $($mi.Sku.Name))" -Action {
-            Stop-AzSqlInstance -Name $mi.ManagedInstanceName `
-                -ResourceGroupName $mi.ResourceGroupName `
-                -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 6.  VIRTUAL WANs â€” delete (opt-in, extremely destructive)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-RemoveVirtualWans {
-    Write-Log "â”€â”€ Checking Azure Virtual WANs â”€â”€"
-    $vwans = Get-AzVirtualWan -ErrorAction SilentlyContinue
-    if (-not $vwans) { Write-Log "No Virtual WANs found." ; return }
-
-    foreach ($vwan in $vwans) {
-        $rg = $vwan.Id -replace '(?i)^/subscriptions/[^/]+/resourceGroups/([^/]+)/.*', '$1'
-        if (Test-IsExcludedResourceGroup $rg) {
-            Write-Log "Skipping vWAN $($vwan.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($vwan.Name, $rg)) {
-            Write-Log "Skipping vWAN $($vwan.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("vWAN:$($vwan.Name)") ; continue
-        }
-
-        if (-not $IncludeVirtualWanDeletion) {
-            Write-Log "vWAN found: $($vwan.Name) (RG: $rg). Deletion SKIPPED â€” set -IncludeVirtualWanDeletion `$true to enable." -Level AUDIT
-            $script:Warnings.Add("Virtual WAN $($vwan.Name) exists and is potentially expensive â€” deletion not enabled.")
-            continue
-        }
-
-        Write-Log "âš ï¸�  DESTRUCTIVE: Will attempt to remove vWAN $($vwan.Name) and all child resources." -Level WARN
-
-        Invoke-ActionOrDryRun -Description "Delete Virtual WAN $($vwan.Name) and child hubs/gateways" -Action {
-            # 1. Remove VPN/ER gateways in each hub
-            $hubs = Get-AzVirtualHub -ResourceGroupName $rg -ErrorAction SilentlyContinue |
-                    Where-Object { $_.VirtualWan.Id -ieq $vwan.Id }
-            foreach ($hub in $hubs) {
-                # VPN Gateway
-                $vpnGw = Get-AzVpnGateway -ResourceGroupName $rg -ErrorAction SilentlyContinue |
-                         Where-Object { $_.VirtualHub.Id -ieq $hub.Id }
-                foreach ($gw in $vpnGw) {
-                    Write-Log "  Removing VPN gateway $($gw.Name)..." -Level ACTION
-                    Remove-AzVpnGateway -Name $gw.Name -ResourceGroupName $rg -Force -ErrorAction Stop | Out-Null
-                }
-                # ExpressRoute Gateway
-                $erGw = Get-AzExpressRouteGateway -ResourceGroupName $rg -ErrorAction SilentlyContinue |
-                        Where-Object { $_.VirtualHub.Id -ieq $hub.Id }
-                foreach ($gw in $erGw) {
-                    Write-Log "  Removing ER gateway $($gw.Name)..." -Level ACTION
-                    Remove-AzExpressRouteGateway -ResourceGroupName $rg -Name $gw.Name -Force -ErrorAction Stop | Out-Null
-                }
-                # Remove hub
-                Write-Log "  Removing virtual hub $($hub.Name)..." -Level ACTION
-                Remove-AzVirtualHub -Name $hub.Name -ResourceGroupName $rg -Force -ErrorAction Stop | Out-Null
-            }
-            # 2. Remove the vWAN itself
-            Remove-AzVirtualWan -Name $vwan.Name -ResourceGroupName $rg -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 7.  DETACHED MANAGED DISKS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-RemoveDetachedDisks {
-    Write-Log "â”€â”€ Checking for detached managed disks â”€â”€"
-    $disks = Get-AzDisk -ErrorAction SilentlyContinue | Where-Object { [string]::IsNullOrEmpty($_.ManagedBy) }
-    if (-not $disks) { Write-Log "No detached managed disks found." ; return }
-
-    foreach ($disk in $disks) {
-        if (Test-IsExcludedResourceGroup $disk.ResourceGroupName) {
-            Write-Log "Skipping disk $($disk.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($disk.Name, $disk.ResourceGroupName) -Tags ($disk.Tags ?? @{})) {
-            Write-Log "Skipping disk $($disk.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("Disk:$($disk.Name)") ; continue
-        }
-
-        $sizeGB = $disk.DiskSizeGB
-        $sku    = $disk.Sku.Name
-        Invoke-ActionOrDryRun -Description "Delete detached disk $($disk.Name) ($sizeGB GB, $sku, RG: $($disk.ResourceGroupName))" -Action {
-            Remove-AzDisk -ResourceGroupName $disk.ResourceGroupName -DiskName $disk.Name -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 8.  ORPHANED SNAPSHOTS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-RemoveOrphanedSnapshots {
-    Write-Log "â”€â”€ Checking for orphaned snapshots â”€â”€"
-    $snapshots = Get-AzSnapshot -ErrorAction SilentlyContinue
-    if (-not $snapshots) { Write-Log "No snapshots found." ; return }
-
-    # Build a set of existing disk IDs for fast lookup
-    $existingDiskIds = @{}
-    Get-AzDisk -ErrorAction SilentlyContinue | ForEach-Object { $existingDiskIds[$_.Id] = $true }
-
-    foreach ($snap in $snapshots) {
-        if (Test-IsExcludedResourceGroup $snap.ResourceGroupName) {
-            Write-Log "Skipping snapshot $($snap.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($snap.Name, $snap.ResourceGroupName) -Tags ($snap.Tags ?? @{})) {
-            Write-Log "Skipping snapshot $($snap.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("Snapshot:$($snap.Name)") ; continue
-        }
-
-        $sourceDiskId = $snap.CreationData.SourceResourceId
-        $isOrphaned   = (-not $sourceDiskId) -or (-not $existingDiskIds.ContainsKey($sourceDiskId))
-
-        if ($isOrphaned) {
-            $sizeGB = $snap.DiskSizeGB
-            Invoke-ActionOrDryRun -Description "Delete orphaned snapshot $($snap.Name) ($sizeGB GB, RG: $($snap.ResourceGroupName))" -Action {
-                Remove-AzSnapshot -ResourceGroupName $snap.ResourceGroupName -SnapshotName $snap.Name -Force -ErrorAction Stop | Out-Null
-            }
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 9.  UNATTACHED PUBLIC IP ADDRESSES
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-RemoveUnattachedPublicIPs {
-    Write-Log "â”€â”€ Checking for unattached public IP addresses â”€â”€"
-    $pips = Get-AzPublicIpAddress -ErrorAction SilentlyContinue | Where-Object { $null -eq $_.IpConfiguration }
-    if (-not $pips) { Write-Log "No unattached public IPs found." ; return }
-
-    foreach ($pip in $pips) {
-        if (Test-IsExcludedResourceGroup $pip.ResourceGroupName) {
-            Write-Log "Skipping PIP $($pip.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($pip.Name, $pip.ResourceGroupName) -Tags ($pip.Tag ?? @{})) {
-            Write-Log "Skipping PIP $($pip.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("PIP:$($pip.Name)") ; continue
-        }
-
-        $sku = $pip.Sku.Name
-        $method = $pip.PublicIpAllocationMethod
-        Invoke-ActionOrDryRun -Description "Delete unattached public IP $($pip.Name) ($sku, $method, RG: $($pip.ResourceGroupName))" -Action {
-            Remove-AzPublicIpAddress -ResourceGroupName $pip.ResourceGroupName -Name $pip.Name -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 10. LONG-TERM BACKUP RETENTION POLICIES (SQL DB)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-AuditBackupPolicies {
-    Write-Log "â”€â”€ Auditing long-term backup retention policies â”€â”€"
-    $servers = Get-AzSqlServer -ErrorAction SilentlyContinue
-    if (-not $servers) { return }
-
-    foreach ($srv in $servers) {
-        $dbs = Get-AzSqlDatabase -ServerName $srv.ServerName -ResourceGroupName $srv.ResourceGroupName -ErrorAction SilentlyContinue |
-               Where-Object { $_.DatabaseName -ne "master" }
-
-        foreach ($db in $dbs) {
-            # Long-Term Retention (LTR)
-            try {
-                $ltr = Get-AzSqlDatabaseBackupLongTermRetentionPolicy `
-                    -ServerName $srv.ServerName `
-                    -DatabaseName $db.DatabaseName `
-                    -ResourceGroupName $srv.ResourceGroupName -ErrorAction Stop
-
-                $hasLtr = ($ltr.WeeklyRetention -and $ltr.WeeklyRetention -ine "PT0S") -or
-                          ($ltr.MonthlyRetention -and $ltr.MonthlyRetention -ine "PT0S") -or
-                          ($ltr.YearlyRetention -and $ltr.YearlyRetention -ine "PT0S")
-
-                if ($hasLtr) {
-                    $detail = "W=$($ltr.WeeklyRetention) M=$($ltr.MonthlyRetention) Y=$($ltr.YearlyRetention)"
-                    Write-Log "LTR policy active on $($srv.ServerName)/$($db.DatabaseName): $detail â€” review for cost." -Level AUDIT
-                }
-            } catch {
-                # Silently skip if LTR query fails (e.g. unsupported edition)
-            }
-
-            # Short-term retention â€” flag if > 14 days (default 7)
-            try {
-                $str = Get-AzSqlDatabaseBackupShortTermRetentionPolicy `
-                    -ServerName $srv.ServerName `
-                    -DatabaseName $db.DatabaseName `
-                    -ResourceGroupName $srv.ResourceGroupName -ErrorAction Stop
-                if ($str.RetentionDays -gt 14) {
-                    Write-Log "Short-term retention for $($srv.ServerName)/$($db.DatabaseName) is $($str.RetentionDays) days (>14)." -Level AUDIT
-                }
-            } catch { }
-
-            # Geo-redundant backup storage
-            try {
-                $redundancy = $db.CurrentBackupStorageRedundancy
-                if ($redundancy -iin @("Geo", "GeoZone")) {
-                    Write-Log "Geo-redundant backup storage on $($srv.ServerName)/$($db.DatabaseName) ($redundancy) â€” consider switching to Local or Zone." -Level AUDIT
-                }
-            } catch { }
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 11. APPLICATION GATEWAYS â€” stop
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-StopApplicationGateways {
-    Write-Log "â”€â”€ Checking Application Gateways â”€â”€"
-    $appGws = Get-AzApplicationGateway -ErrorAction SilentlyContinue
-    if (-not $appGws) { Write-Log "No Application Gateways found." ; return }
-
-    foreach ($gw in $appGws) {
-        if (Test-IsExcludedResourceGroup $gw.ResourceGroupName) {
-            Write-Log "Skipping App GW $($gw.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($gw.Name, $gw.ResourceGroupName) -Tags ($gw.Tag ?? @{})) {
-            Write-Log "Skipping App GW $($gw.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("AppGW:$($gw.Name)") ; continue
-        }
-
-        if ($gw.OperationalState -ieq "Stopped") {
-            Write-Log "App GW $($gw.Name) is already stopped." -Level SKIP ; continue
-        }
-
-        $sku = "$($gw.Sku.Name)/$($gw.Sku.Tier)"
-        Invoke-ActionOrDryRun -Description "Stop Application Gateway $($gw.Name) ($sku)" -Action {
-            Stop-AzApplicationGateway -ApplicationGateway $gw -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 12. DATA EXPLORER (KUSTO) CLUSTERS â€” stop
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-StopDataExplorerClusters {
-    Write-Log "â”€â”€ Checking Azure Data Explorer (Kusto) clusters â”€â”€"
-    try {
-        $clusters = Get-AzKustoCluster -ErrorAction Stop
-    } catch {
-        Write-Log "Az.Kusto module may not be available: $_" -Level WARN ; return
-    }
-    if (-not $clusters) { Write-Log "No Data Explorer clusters found." ; return }
-
-    foreach ($cluster in $clusters) {
-        if (Test-IsExcludedResourceGroup $cluster.ResourceGroupName) {
-            Write-Log "Skipping ADX $($cluster.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($cluster.Name, $cluster.ResourceGroupName)) {
-            Write-Log "Skipping ADX $($cluster.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("ADX:$($cluster.Name)") ; continue
-        }
-
-        if ($cluster.State -ieq "Running") {
-            Invoke-ActionOrDryRun -Description "Stop Data Explorer cluster $($cluster.Name)" -Action {
-                Stop-AzKustoCluster -Name $cluster.Name -ResourceGroupName $cluster.ResourceGroupName -ErrorAction Stop | Out-Null
-            }
-        } else {
-            Write-Log "ADX cluster $($cluster.Name) state=$($cluster.State)." -Level SKIP
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 13. ANALYSIS SERVICES â€” pause
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-PauseAnalysisServices {
-    Write-Log "â”€â”€ Checking Azure Analysis Services â”€â”€"
-    try {
-        $servers = Get-AzAnalysisServicesServer -ErrorAction Stop
-    } catch {
-        Write-Log "Az.AnalysisServices may not be available: $_" -Level WARN ; return
-    }
-    if (-not $servers) { Write-Log "No Analysis Services servers found." ; return }
-
-    foreach ($as in $servers) {
-        if (Test-IsExcludedResourceGroup $as.ResourceGroupName) {
-            Write-Log "Skipping AAS $($as.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($as.Name, $as.ResourceGroupName) -Tags ($as.Tag ?? @{})) {
-            Write-Log "Skipping AAS $($as.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("AAS:$($as.Name)") ; continue
-        }
-
-        if ($as.State -ine "Paused") {
-            Invoke-ActionOrDryRun -Description "Pause Analysis Services server $($as.Name) (SKU: $($as.Sku.Name))" -Action {
-                Suspend-AzAnalysisServicesServer -Name $as.Name -ResourceGroupName $as.ResourceGroupName -ErrorAction Stop | Out-Null
-            }
-        } else {
-            Write-Log "AAS $($as.Name) is already paused." -Level SKIP
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 14. VIRTUAL MACHINES â€” deallocate (opt-in)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-DeallocateVirtualMachines {
-    Write-Log "â”€â”€ Checking Virtual Machines â”€â”€"
-    $vms = Get-AzVM -Status -ErrorAction SilentlyContinue
-    if (-not $vms) { Write-Log "No VMs found." ; return }
-
-    $runningVms = $vms | Where-Object { $_.PowerState -ieq "VM running" }
-    if (-not $runningVms) { Write-Log "No running VMs." ; return }
-
-    foreach ($vm in $runningVms) {
-        if (Test-IsExcludedResourceGroup $vm.ResourceGroupName) {
-            Write-Log "Skipping VM $($vm.Name) â€” excluded RG." -Level SKIP ; continue
-        }
-        if (Test-ProductionIndicators -NamesToCheck @($vm.Name, $vm.ResourceGroupName) -Tags ($vm.Tags ?? @{})) {
-            Write-Log "Skipping VM $($vm.Name) â€” production indicator." -Level WARN
-            $script:SkippedProd.Add("VM:$($vm.Name)") ; continue
-        }
-
-        if (-not $IncludeVmDeallocation) {
-            Write-Log "Running VM found: $($vm.Name) (Size: $($vm.HardwareProfile.VmSize), RG: $($vm.ResourceGroupName)) â€” deallocate not enabled." -Level AUDIT
-            continue
-        }
-
-        Invoke-ActionOrDryRun -Description "Deallocate VM $($vm.Name) ($($vm.HardwareProfile.VmSize))" -Action {
-            Stop-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# 15. REPORT OTHER EXPENSIVE RESOURCES
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function Invoke-AuditExpensiveResources {
-    Write-Log "â”€â”€ Auditing other expensive resource types â”€â”€"
-
-    # --- VPN / ExpressRoute Gateways (requires -ResourceGroupName, so discover via Get-AzResource) ---
-    $vnetGwResources = Get-AzResource -ResourceType "Microsoft.Network/virtualNetworkGateways" -ErrorAction SilentlyContinue
-    foreach ($gwRes in $vnetGwResources) {
-        try {
-            $gw = Get-AzVirtualNetworkGateway -Name $gwRes.Name -ResourceGroupName $gwRes.ResourceGroupName -ErrorAction Stop
-            if ($gw.GatewayType -ieq "Vpn") {
-                Write-Log "VPN Gateway: $($gw.Name) (SKU: $($gw.Sku.Name), RG: $($gw.ResourceGroupName)) â€” ~`$0.04â€“`$1.25/hr depending on SKU." -Level AUDIT
-            } elseif ($gw.GatewayType -ieq "ExpressRoute") {
-                Write-Log "ExpressRoute Gateway: $($gw.Name) (SKU: $($gw.Sku.Name), RG: $($gw.ResourceGroupName)) â€” expensive, review needed." -Level AUDIT
-            }
-        } catch {
-            Write-Log "Could not query VNet gateway $($gwRes.Name): $_" -Level WARN
-        }
-    }
-
-    # --- ExpressRoute Circuits ---
-    $circuits = Get-AzExpressRouteCircuit -ErrorAction SilentlyContinue
-    foreach ($c in $circuits) {
-        Write-Log "ExpressRoute Circuit: $($c.Name) (Tier: $($c.Sku.Tier), Bandwidth: $($c.ServiceProviderProperties.BandwidthInMbps) Mbps)." -Level AUDIT
-    }
-
-    # --- Bastion Hosts ---
-    $bastions = Get-AzResource -ResourceType "Microsoft.Network/bastionHosts" -ErrorAction SilentlyContinue
-    foreach ($b in $bastions) {
-        Write-Log "Bastion Host: $($b.Name) (RG: $($b.ResourceGroupName)) â€” ~`$0.19/hr. Cannot be paused; consider deleting if not in use." -Level AUDIT
-    }
-
-    # --- NAT Gateways ---
-    $natGws = Get-AzNatGateway -ErrorAction SilentlyContinue
-    foreach ($nat in $natGws) {
-        Write-Log "NAT Gateway: $($nat.Name) (RG: $($nat.ResourceGroupName)) â€” ~`$0.045/hr + data charges." -Level AUDIT
-    }
-
-    # --- Standard Load Balancers ---
-    $lbs = Get-AzLoadBalancer -ErrorAction SilentlyContinue | Where-Object { $_.Sku.Name -ieq "Standard" }
-    foreach ($lb in $lbs) {
-        $ruleCount = ($lb.LoadBalancingRules.Count + $lb.OutboundRules.Count + $lb.InboundNatRules.Count)
-        if ($ruleCount -eq 0) {
-            Write-Log "Empty Standard LB: $($lb.Name) (RG: $($lb.ResourceGroupName)) â€” has no rules, consider deleting." -Level AUDIT
-        }
-    }
-
-    # --- Cosmos DB â€” high provisioned RU/s ---
-    $cosmosResources = Get-AzResource -ResourceType "Microsoft.DocumentDb/databaseAccounts" -ErrorAction SilentlyContinue
-    foreach ($cosmosRes in $cosmosResources) {
-        try {
-            $acct = Get-AzCosmosDBAccount -Name $cosmosRes.Name -ResourceGroupName $cosmosRes.ResourceGroupName -ErrorAction Stop
-            $sqlDbs = Get-AzCosmosDBSqlDatabase -AccountName $acct.Name -ResourceGroupName $acct.ResourceGroupName -ErrorAction SilentlyContinue
-            foreach ($cdb in $sqlDbs) {
-                $containers = Get-AzCosmosDBSqlContainer -AccountName $acct.Name `
-                    -ResourceGroupName $acct.ResourceGroupName `
-                    -DatabaseName $cdb.Name -ErrorAction SilentlyContinue
-                foreach ($cont in $containers) {
-                    try {
-                        $throughput = Get-AzCosmosDBSqlContainerThroughput -AccountName $acct.Name `
-                            -ResourceGroupName $acct.ResourceGroupName `
-                            -DatabaseName $cdb.Name `
-                            -Name $cont.Name -ErrorAction Stop
-                        $ru = $throughput.Resource.Throughput
-                        $maxRu = $throughput.Resource.AutoscaleSettings.MaxThroughput
-                        if ($ru -and $ru -gt 1000) {
-                            Write-Log "Cosmos DB $($acct.Name)/$($cdb.Name)/$($cont.Name): provisioned $ru RU/s â€” consider serverless or lowering." -Level AUDIT
-                        }
-                        if ($maxRu -and $maxRu -gt 4000) {
-                            Write-Log "Cosmos DB $($acct.Name)/$($cdb.Name)/$($cont.Name): autoscale max $maxRu RU/s â€” review." -Level AUDIT
-                        }
-                    } catch { }
-                }
-            }
-        } catch {
-            Write-Log "Could not query Cosmos DB account $($cosmosRes.Name): $_" -Level WARN
-        }
-    }
-
-    # --- Redis Cache â€” Premium/Enterprise tiers ---
-    $redisInstances = Get-AzResource -ResourceType "Microsoft.Cache/redis" -ErrorAction SilentlyContinue
-    foreach ($r in $redisInstances) {
-        try {
-            $detail = Get-AzRedisCache -ResourceGroupName $r.ResourceGroupName -Name $r.Name -ErrorAction Stop
-            if ($detail.Sku -iin @("Premium", "Enterprise", "EnterpriseFlash")) {
-                Write-Log "Redis Cache: $($r.Name) (SKU: $($detail.Sku), Size: $($detail.Size)) â€” expensive tier, review needed." -Level AUDIT
-            }
-        } catch { }
-    }
-
-    # --- AKS Clusters ---
-    try {
-        $aksClusters = Get-AzAksCluster -ErrorAction Stop
-        foreach ($aks in $aksClusters) {
-            $totalNodes = ($aks.AgentPoolProfiles | Measure-Object -Property Count -Sum).Sum
-            Write-Log "AKS Cluster: $($aks.Name) (RG: $($aks.ResourceGroupName), Node Pools: $($aks.AgentPoolProfiles.Count), Total Nodes: $totalNodes) â€” review node sizes and counts." -Level AUDIT
-        }
-    } catch { }
-
-    # --- HDInsight Clusters ---
-    $hdiClusters = Get-AzResource -ResourceType "Microsoft.HDInsight/clusters" -ErrorAction SilentlyContinue
-    foreach ($hdi in $hdiClusters) {
-        Write-Log "HDInsight Cluster: $($hdi.Name) (RG: $($hdi.ResourceGroupName)) â€” these are expensive; delete if not needed." -Level AUDIT
-    }
-
-    # --- Databricks Workspaces ---
-    $dbwSpaces = Get-AzResource -ResourceType "Microsoft.Databricks/workspaces" -ErrorAction SilentlyContinue
-    foreach ($dbw in $dbwSpaces) {
-        Write-Log "Databricks Workspace: $($dbw.Name) (RG: $($dbw.ResourceGroupName)) â€” check for running clusters inside." -Level AUDIT
-    }
-
-    # --- Log Analytics â€” high retention ---
-    try {
-        $laWorkspaces = Get-AzResource -ResourceType "Microsoft.OperationalInsights/workspaces" -ErrorAction SilentlyContinue
-        foreach ($la in $laWorkspaces) {
-            try {
-                $detail = Get-AzOperationalInsightsWorkspace -ResourceGroupName $la.ResourceGroupName -Name $la.Name -ErrorAction Stop
-                $retention = $detail.RetentionInDays
-                if ($retention -gt 90) {
-                    Write-Log "Log Analytics $($la.Name): retention = $retention days (>90). Additional storage costs apply." -Level AUDIT
-                }
-            } catch { }
-        }
-    } catch { }
-
-    # --- Running Container Instances ---
-    $acis = Get-AzResource -ResourceType "Microsoft.ContainerInstance/containerGroups" -ErrorAction SilentlyContinue
-    foreach ($aci in $acis) {
-        Write-Log "Container Instance: $($aci.Name) (RG: $($aci.ResourceGroupName)) â€” billed while running." -Level AUDIT
-    }
-
-    # --- Azure API Management (Premium is very expensive) ---
-    $apims = Get-AzResource -ResourceType "Microsoft.ApiManagement/service" -ErrorAction SilentlyContinue
-    foreach ($apim in $apims) {
-        try {
-            $getUri = "$($apim.ResourceId)?api-version=2022-08-01"
-            $detail = Invoke-AzRestMethod -Path $getUri -Method GET -ErrorAction Stop
-            $body = $detail.Content | ConvertFrom-Json
-            $sku  = $body.sku.name
-            $cap  = $body.sku.capacity
-            if ($sku -iin @("Premium", "Developer", "Standard")) {
-                Write-Log "API Management: $($apim.Name) (SKU: $sku, Units: $cap) â€” Premium is ~`$2,800/unit/month." -Level AUDIT
-            }
-        } catch { }
-    }
-
-    # --- Azure Machine Learning Compute Instances ---
-    $amlWorkspaces = Get-AzResource -ResourceType "Microsoft.MachineLearningServices/workspaces" -ErrorAction SilentlyContinue
-    foreach ($aml in $amlWorkspaces) {
-        Write-Log "ML Workspace: $($aml.Name) (RG: $($aml.ResourceGroupName)) â€” check for running compute instances and clusters." -Level AUDIT
-    }
-}
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# MAIN EXECUTION
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-Write-Output ""
-Write-Output "â•”â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•—"
-Write-Output "â•‘          AZURE COST OPTIMIZATION RUNBOOK                                â•‘"
-Write-Output "â•‘                                                                         â•‘"
-Write-Output "â•‘  âš ï¸�  WARNING: This runbook performs DESTRUCTIVE operations.              â•‘"
-Write-Output "â•‘  DO NOT RUN AGAINST PRODUCTION ENVIRONMENTS.                            â•‘"
-Write-Output "â•‘                                                                         â•‘"
-if ($DryRun) {
-Write-Output "â•‘  Mode: ğŸ”� DRY RUN â€” no changes will be made.                           â•‘"
-} else {
-Write-Output "â•‘  Mode: ğŸ”´ LIVE EXECUTION â€” resources WILL be modified and deleted!      â•‘"
-}
-Write-Output "â•‘                                                                         â•‘"
-Write-Output "â•‘  VM Deallocation:   $(if ($IncludeVmDeallocation) { 'ENABLED ' } else { 'DISABLED' })                                        â•‘"
-Write-Output "â•‘  vWAN Deletion:     $(if ($IncludeVirtualWanDeletion) { 'ENABLED ' } else { 'DISABLED' })                                        â•‘"
-Write-Output "â•šâ•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�"
-Write-Output ""
-
-# â”€â”€ Authenticate with Managed Identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-Write-Log "Connecting to Azure via system-assigned managed identity..."
+# Connect using Managed Identity
 try {
-    Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
-    Write-Log "Successfully authenticated."
-} catch {
-    Write-Log "Failed to authenticate with managed identity: $_" -Level ERROR
-    throw "Cannot continue without authentication."
+    Write-Output "Connecting to Azure using Managed Identity..."
+    $AzureConnection = (Connect-AzAccount -Identity).Context
+    Write-Output "[OK] Successfully authenticated as: $($AzureConnection.Account.Id)"
+}
+catch {
+    Write-Error "Failed to authenticate with Managed Identity: $_"
+    exit 1
 }
 
-# â”€â”€ Enumerate subscriptions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-$allSubs = Get-AzSubscription -ErrorAction Stop |
-           Where-Object { $_.State -eq "Enabled" } |
-           Where-Object { $_.Id -notin $ExcludeSubscriptionIds }
+# ============================================================================
+# GET SUBSCRIPTIONS
+# ============================================================================
 
-Write-Log "Found $($allSubs.Count) accessible subscription(s) (after exclusions)."
+Write-Output "`nRetrieving accessible subscriptions..."
+$Subscriptions = Get-AzSubscription | Where-Object { $_.State -eq 'Enabled' }
+Write-Output "[OK] Found $($Subscriptions.Count) enabled subscription(s)"
 
-if ($allSubs.Count -eq 0) {
-    Write-Log "No subscriptions to process. Exiting." -Level WARN
-    return
-}
+# ============================================================================
+# VM COST ANALYSIS
+# ============================================================================
 
-# â”€â”€ Process each subscription â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-foreach ($sub in $allSubs) {
-    Write-Output ""
-    Write-Output "â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�"
-    Write-Log "Processing subscription: $($sub.Name) ($($sub.Id))"
-    Write-Output "â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�â”�"
+$AllVMData = @()
+$TotalRunningVMs = 0
+$TotalStoppedAllocated = 0
+$TotalDeallocated = 0
 
-    # Check subscription name for production indicators
-    if (Test-ProductionIndicators -NamesToCheck @($sub.Name)) {
-        Write-Log "â›” SKIPPING entire subscription '$($sub.Name)' â€” matches production keyword." -Level WARN
-        $script:SkippedProd.Add("Subscription:$($sub.Name)")
-        continue
-    }
+foreach ($Subscription in $Subscriptions) {
+    Write-Output "`n--- Analyzing Subscription: $($Subscription.Name) ---"
 
     # Set context
+    $null = Set-AzContext -SubscriptionId $Subscription.Id
+
+    # Get all VMs
     try {
-        Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
-    } catch {
-        Write-Log "Failed to set context for subscription $($sub.Name): $_" -Level ERROR
-        continue
+        $VMs = Get-AzVM -Status
+        Write-Output "  Found $($VMs.Count) VM(s)"
+
+        foreach ($VM in $VMs) {
+            # Get power state
+            $PowerState = ($VM.Statuses | Where-Object { $_.Code -like 'PowerState/*' }).Code -replace 'PowerState/', ''
+
+            # Categorize by state
+            switch ($PowerState) {
+                'running' { $TotalRunningVMs++ }
+                'stopped' { $TotalStoppedAllocated++ }  # Stopped but still allocated (incurs costs)
+                'deallocated' { $TotalDeallocated++ }
+            }
+
+            # Get VM size details
+            $VMSize = $VM.HardwareProfile.VmSize
+
+            # Extract resource group and tags
+            $ResourceGroup = $VM.ResourceGroupName
+            $Tags = $VM.Tags
+
+            # Build VM data object
+            $VMData = [PSCustomObject]@{
+                SubscriptionId   = $Subscription.Id
+                SubscriptionName = $Subscription.Name
+                ResourceGroup    = $ResourceGroup
+                VMName           = $VM.Name
+                Location         = $VM.Location
+                VMSize           = $VMSize
+                PowerState       = $PowerState
+                OSDiskType       = $VM.StorageProfile.OsDisk.ManagedDisk.StorageAccountType
+                DataDiskCount    = $VM.StorageProfile.DataDisks.Count
+                NetworkInterfaces = $VM.NetworkProfile.NetworkInterfaces.Count
+                Tags             = if ($Tags) { ($Tags | ConvertTo-Json -Compress) } else { $null }
+                Timestamp        = Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'
+            }
+
+            $AllVMData += $VMData
+
+            # Log VM details
+            Write-Output "    VM: $($VM.Name) | Size: $VMSize | State: $PowerState"
+        }
+    }
+    catch {
+        Write-Warning "  Error retrieving VMs: $_"
+    }
+}
+
+# ============================================================================
+# SUMMARY STATISTICS
+# ============================================================================
+
+Write-Output "`n=== VM Cost Analysis Summary ==="
+Write-Output "Total VMs Analyzed: $($AllVMData.Count)"
+Write-Output "  Running:             $TotalRunningVMs (incurring compute costs)"
+Write-Output "  Stopped (allocated): $TotalStoppedAllocated (incurring storage costs)"
+Write-Output "  Deallocated:         $TotalDeallocated (minimal costs)"
+
+# Cost optimization opportunities
+if ($TotalStoppedAllocated -gt 0) {
+    Write-Output "`n[WARNING]  COST OPTIMIZATION OPPORTUNITY:"
+    Write-Output "  $TotalStoppedAllocated VM(s) are STOPPED but still ALLOCATED"
+    Write-Output "  These VMs still incur storage and reservation costs"
+    Write-Output "  Recommendation: Deallocate stopped VMs to reduce costs"
+}
+
+# VM size distribution
+$VMSizeDistribution = $AllVMData | Group-Object VMSize | Sort-Object Count -Descending
+Write-Output "`n=== VM Size Distribution ==="
+foreach ($Size in $VMSizeDistribution | Select-Object -First 10) {
+    Write-Output "  $($Size.Name): $($Size.Count) VM(s)"
+}
+
+# Region distribution
+$RegionDistribution = $AllVMData | Group-Object Location | Sort-Object Count -Descending
+Write-Output "`n=== VM Region Distribution ==="
+foreach ($Region in $RegionDistribution) {
+    Write-Output "  $($Region.Name): $($Region.Count) VM(s)"
+}
+
+# ============================================================================
+# EXPORT TO BLOB STORAGE
+# ============================================================================
+
+Write-Output "`n=== Exporting Results to Blob Storage ==="
+
+# Generate report filename
+$ReportDate = Get-Date -Format 'yyyyMMdd-HHmmss'
+$ReportFileName = "$ReportPrefix-$ReportDate.json"
+
+try {
+    # Convert data to JSON
+    $JsonOutput = $AllVMData | ConvertTo-Json -Depth 10
+
+    # Get storage account
+    Write-Output "Retrieving storage account: $StorageAccountName"
+    $StorageAccount = Get-AzStorageAccount | Where-Object { $_.StorageAccountName -eq $StorageAccountName }
+
+    if (-not $StorageAccount) {
+        throw "Storage account '$StorageAccountName' not found"
     }
 
-    # Execute all cost-optimization functions
-    Invoke-PauseFabricCapacities
-    Invoke-ScaleDownSqlDatabases
-    Invoke-PauseSynapsePools
-    Invoke-DeallocateFirewalls
-    Invoke-StopSqlManagedInstances
-    Invoke-RemoveVirtualWans
-    Invoke-RemoveDetachedDisks
-    Invoke-RemoveOrphanedSnapshots
-    Invoke-RemoveUnattachedPublicIPs
-    Invoke-AuditBackupPolicies
-    Invoke-StopApplicationGateways
-    Invoke-StopDataExplorerClusters
-    Invoke-PauseAnalysisServices
-    Invoke-DeallocateVirtualMachines
-    Invoke-AuditExpensiveResources
+    # Get storage context
+    $StorageContext = $StorageAccount.Context
+
+    # Create temporary file
+    $TempFile = [System.IO.Path]::GetTempFileName()
+    $JsonOutput | Out-File -FilePath $TempFile -Encoding utf8
+
+    # Upload to blob storage
+    Write-Output "Uploading report to blob: $ContainerName/$ReportFileName"
+    Set-AzStorageBlobContent `
+        -File $TempFile `
+        -Container $ContainerName `
+        -Blob $ReportFileName `
+        -Context $StorageContext `
+        -Force | Out-Null
+
+    # Clean up temp file
+    Remove-Item -Path $TempFile -Force
+
+    Write-Output "[OK] Successfully uploaded report to blob storage"
+    Write-Output "  Location: $ContainerName/$ReportFileName"
+    Write-Output "  Size: $($AllVMData.Count) VM records"
+}
+catch {
+    Write-Error "Failed to upload report to blob storage: $_"
 }
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# SUMMARY REPORT
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-Write-Output ""
-Write-Output "â•”â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•—"
-Write-Output "â•‘                         EXECUTION SUMMARY                               â•‘"
-Write-Output "â•šâ•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�"
-Write-Output ""
-Write-Output "Mode:                $(if ($DryRun) { 'DRY RUN (no changes made)' } else { 'LIVE EXECUTION' })"
-Write-Output "Subscriptions:       $($allSubs.Count) processed"
-Write-Output "Actions taken:       $($script:ActionsTaken.Count)"
-Write-Output "Warnings:            $($script:Warnings.Count)"
-Write-Output "Errors:              $($script:Errors.Count)"
-Write-Output "Skipped (prod):      $($script:SkippedProd.Count)"
-Write-Output ""
+# ============================================================================
+# COST RECOMMENDATIONS
+# ============================================================================
 
-if ($script:ActionsTaken.Count -gt 0) {
-    Write-Output "â”€â”€ ACTIONS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
-    foreach ($a in $script:ActionsTaken) { Write-Output "  âœ… $a" }
-    Write-Output ""
+Write-Output "`n=== Cost Optimization Recommendations ==="
+
+# Stopped VMs that should be deallocated
+$StoppedVMs = $AllVMData | Where-Object { $_.PowerState -eq 'stopped' }
+if ($StoppedVMs.Count -gt 0) {
+    Write-Output "`n1. DEALLOCATE STOPPED VMs ($($StoppedVMs.Count) VMs)"
+    Write-Output "   The following VMs are stopped but still allocated (incurring costs):"
+    foreach ($VM in $StoppedVMs | Select-Object -First 5) {
+        Write-Output "   - $($VM.VMName) ($($VM.VMSize)) in $($VM.ResourceGroup)"
+    }
+    if ($StoppedVMs.Count -gt 5) {
+        Write-Output "   ... and $($StoppedVMs.Count - 5) more"
+    }
+    Write-Output "   Action: Use 'Stop-AzVM -Force' or 'Deallocate' in portal"
 }
 
-if ($script:Warnings.Count -gt 0) {
-    Write-Output "â”€â”€ WARNINGS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
-    foreach ($w in $script:Warnings) { Write-Output "  âš ï¸�  $w" }
-    Write-Output ""
+# Large VM sizes that might be over-provisioned
+$LargeVMFamilies = @('Standard_D64', 'Standard_E64', 'Standard_M', 'Standard_G')
+$LargeVMs = $AllVMData | Where-Object {
+    $VMSize = $_.VMSize
+    $LargeVMFamilies | Where-Object { $VMSize -like "$_*" }
+}
+if ($LargeVMs.Count -gt 0) {
+    Write-Output "`n2. REVIEW LARGE VM SIZES ($($LargeVMs.Count) VMs)"
+    Write-Output "   Consider if these large VMs are fully utilized:"
+    foreach ($VM in $LargeVMs | Select-Object -First 5) {
+        Write-Output "   - $($VM.VMName) ($($VM.VMSize)) - $($VM.PowerState)"
+    }
+    Write-Output "   Action: Review CPU/memory utilization and consider downsizing"
 }
 
-if ($script:Errors.Count -gt 0) {
-    Write-Output "â”€â”€ ERRORS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
-    foreach ($e in $script:Errors) { Write-Output "  â�Œ $e" }
-    Write-Output ""
+# Running VMs with premium disks
+$PremiumDiskVMs = $AllVMData | Where-Object {
+    $_.PowerState -eq 'running' -and $_.OSDiskType -like '*Premium*'
+}
+if ($PremiumDiskVMs.Count -gt 0) {
+    Write-Output "`n3. PREMIUM DISK USAGE ($($PremiumDiskVMs.Count) VMs)"
+    Write-Output "   VMs with Premium SSD disks (higher cost):"
+    Write-Output "   Action: Consider Standard SSD for non-production workloads"
 }
 
-if ($script:SkippedProd.Count -gt 0) {
-    Write-Output "â”€â”€ SKIPPED (PRODUCTION) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€"
-    foreach ($s in $script:SkippedProd) { Write-Output "  â›” $s" }
-    Write-Output ""
-}
+# ============================================================================
+# COMPLETION
+# ============================================================================
 
-if ($DryRun) {
-    Write-Output "â•”â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•—"
-    Write-Output "â•‘  This was a DRY RUN. To execute changes, re-run with -DryRun `$false.   â•‘"
-    Write-Output "â•‘  âš ï¸�  REVIEW ALL ACTIONS ABOVE CAREFULLY BEFORE LIVE EXECUTION.          â•‘"
-    Write-Output "â•šâ•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�â•�"
-}
+Write-Output "`n=== VM Cost Analysis Complete ==="
+Write-Output "Report stored in: $ContainerName/$ReportFileName"
+Write-Output "Next scheduled run: Check Automation Schedule 'Nightly VM Cost Analysis'"
 
-Write-Output ""
-Write-Log "Runbook execution complete."
+# Exit successfully
+exit 0

@@ -14,7 +14,7 @@
 | VMSizes | Automation Account | Orchestrates data collection and automation tasks |
 | VMSizes/GetData | Runbook | Collects VM SKU data from Azure APIs |
 | VMSizes/Cleanup | Runbook | Cleans up old data |
-| VMSizes/Azure-Cost-Management | Runbook | Tracks and reports Azure costs |
+| VMSizes/Azure-Cost-Management | Runbook | Analyzes and reports VM costs (VMs only) |
 | VMSizes/AzureAutomationTutorialWithIdentity | Runbook | Tutorial example |
 | VMSizes/AzureAutomationTutorialWithIdentityGraphical | Runbook (Graphical) | Graphical tutorial |
 | VMSizes/PythonDemo | Runbook (Python) | Python automation example |

@@ -271,7 +271,7 @@ The SQL module automatically deploys this schema:
 |----------|-----------|---------|---------|
 | Daily VM Collection | Daily | GetData-v2 | Collect VM sizes and metadata |
 | Weekly Pricing Update | Weekly (Sunday) | GetPricingData | Update pricing data |
-| Nightly Cost Management | Daily | Azure-Cost-Management | Cost reporting |
+| Nightly VM Cost Analysis | Daily | Azure-Cost-Management | VM cost analysis (scope: VMs only) |
 
 ## Secrets Management
 

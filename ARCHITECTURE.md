@@ -18,7 +18,7 @@ This repository contains the complete Azure infrastructure and code for the Data
 
 - **Cleanup.ps1**: Maintenance runbook for cleaning up old data
 
-- **Azure-Cost-Management.ps1**: Cost reporting and management automation
+- **Azure-Cost-Management.ps1**: VM cost analysis and reporting (scope: VMs only)
 
 - **AzureAutomationTutorialWithIdentity.ps1**: Tutorial/example runbook demonstrating Managed Identity usage
 

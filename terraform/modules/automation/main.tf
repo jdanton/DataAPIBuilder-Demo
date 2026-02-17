@@ -151,6 +151,9 @@ resource "azurerm_automation_runbook" "azure_cost_management" {
   log_progress            = false
   runbook_type            = "PowerShell72"
 
+  # Note: For this project, scope should be limited to VM costs only
+  # The included runbook performs broader cost optimization
+  # Consider customizing to focus on VM-specific cost analysis
   content = file("${var.runbooks_path}/Azure-Cost-Management.ps1")
 
   tags = var.tags
@@ -207,14 +210,14 @@ resource "azurerm_automation_schedule" "weekly_pricing" {
 }
 
 resource "azurerm_automation_schedule" "nightly_cost_management" {
-  name                    = "Nightly Cost Management"
+  name                    = "Nightly VM Cost Analysis"
   resource_group_name     = var.resource_group_name
   automation_account_name = azurerm_automation_account.main.name
   frequency               = "Day"
   interval                = 1
   timezone                = "America/New_York"
   start_time              = timeadd(timestamp(), "24h") # Start 24 hours from now
-  description             = "Nightly cost management reporting"
+  description             = "Nightly VM cost analysis and reporting"
 }
 
 # Job Schedules (Link runbooks to schedules)
