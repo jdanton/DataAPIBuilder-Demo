@@ -4,16 +4,17 @@ This directory contains Terraform configuration for deploying the complete DataA
 
 ## Overview
 
-This Terraform configuration deploys 22+ Azure resources organized into modular components:
+This Terraform configuration deploys 20+ Azure resources organized into modular components:
 
 - **Automation**: Azure Automation Account with 6 PowerShell runbooks and schedules
 - **SQL**: Azure SQL Server and Database with schema deployment
 - **Storage**: Azure Storage Account with containers and file shares
 - **Container Registry**: Azure Container Registry for Docker images
-- **App Service**: Linux App Service hosting Data API Builder container
+- **App Service**: Linux App Service hosting Data API Builder container (with public endpoint)
 - **Logic App**: Logic App workflow with managed identity
-- **Networking**: Public IP and Web Application Firewall policy
 - **IAM**: Role assignments for managed identities
+
+**Note**: The networking module (Public IP + WAF Policy) is commented out by default. It's available for future Application Gateway deployment if needed.
 
 ## Prerequisites
 
@@ -168,9 +169,9 @@ terraform/
 │   ├── sql/                   # SQL Server + Database
 │   ├── storage/               # Storage Account + containers
 │   ├── container-registry/    # Azure Container Registry
-│   ├── app-service/           # App Service Plan + Web App
+│   ├── app-service/           # App Service Plan + Web App (public endpoint)
 │   ├── logic-app/             # Logic App workflow
-│   ├── networking/            # Public IP + WAF
+│   ├── networking/            # Public IP + WAF (optional - for App Gateway)
 │   └── iam/                   # Role assignments
 ├── files/
 │   ├── runbooks/              # PowerShell runbooks
@@ -181,6 +182,51 @@ terraform/
     ├── staging/
     └── prod/
 ```
+
+## Architecture
+
+The deployed infrastructure creates a serverless data API platform:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Internet                            │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+              ┌────────────────────┐
+              │  App Service       │
+              │  (vmsizesazure)    │  ← Public HTTPS endpoint
+              │                    │     https://vmsizesazure.azurewebsites.net
+              └────────┬───────────┘
+                       │
+                       ▼
+              ┌────────────────────┐
+              │ Data API Builder   │  ← REST API: /api/*
+              │ (Container)        │  ← GraphQL: /graphql
+              └────────┬───────────┘
+                       │
+         ┌─────────────┴─────────────┐
+         ▼                           ▼
+┌────────────────┐         ┌─────────────────┐
+│  Azure Files   │         │   SQL Database  │
+│  (Config)      │         │   (VMSizes)     │
+└────────────────┘         └─────────────────┘
+
+Background Data Collection:
+┌──────────────────────┐
+│ Automation Account   │  ← Scheduled runbooks
+│ - GetData-v2 (Daily) │  ← Collect VM sizes
+│ - GetPricing (Weekly)│  ← Update pricing
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│  Blob Storage        │  ← JSON/Parquet data
+│  (5 containers)      │
+└──────────────────────┘
+```
+
+**Note**: App Service provides its own public endpoint. There is no Application Gateway or separate Public IP in the base deployment. The networking module (Public IP + WAF Policy) is available but commented out for future Application Gateway deployment.
 
 ## Key Resources Created
 

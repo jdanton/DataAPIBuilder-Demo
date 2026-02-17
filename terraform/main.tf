@@ -69,18 +69,19 @@ module "container_registry" {
   depends_on = [azurerm_resource_group.main]
 }
 
-# Networking Module
-module "networking" {
-  source = "./modules/networking"
-
-  public_ip_name      = var.public_ip_name
-  waf_policy_name     = var.waf_policy_name
-  location            = var.location
-  resource_group_name = azurerm_resource_group.main.name
-  tags                = var.tags
-
-  depends_on = [azurerm_resource_group.main]
-}
+# Networking Module (Commented out - for future Application Gateway deployment)
+# Uncomment this module if you plan to add Application Gateway in front of App Service
+# module "networking" {
+#   source = "./modules/networking"
+#
+#   public_ip_name      = var.public_ip_name
+#   waf_policy_name     = var.waf_policy_name
+#   location            = var.location
+#   resource_group_name = azurerm_resource_group.main.name
+#   tags                = var.tags
+#
+#   depends_on = [azurerm_resource_group.main]
+# }
 
 # App Service Module
 module "app_service" {

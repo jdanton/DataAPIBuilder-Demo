@@ -103,17 +103,18 @@ variable "logic_app_name" {
   default     = "VMSizesLogicApp"
 }
 
-variable "public_ip_name" {
-  description = "Name of the Public IP"
-  type        = string
-  default     = "appgw-pip-datapibuilder"
-}
+# Networking variables (commented out - for future Application Gateway)
+# variable "public_ip_name" {
+#   description = "Name of the Public IP"
+#   type        = string
+#   default     = "appgw-pip-datapibuilder"
+# }
 
-variable "waf_policy_name" {
-  description = "Name of the WAF Policy"
-  type        = string
-  default     = "DemoAppGW-WAF-Policy"
-}
+# variable "waf_policy_name" {
+#   description = "Name of the WAF Policy"
+#   type        = string
+#   default     = "DemoAppGW-WAF-Policy"
+# }
 
 variable "tags" {
   description = "Tags to apply to all resources"

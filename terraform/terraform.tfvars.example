@@ -32,8 +32,8 @@ container_registry_name  = "dataapibuilderdemojd"
 app_service_plan_name    = "ASP-DataAPIBuilder-a8e9"
 web_app_name             = "vmsizesazure"
 logic_app_name           = "VMSizesLogicApp"
-public_ip_name           = "appgw-pip-datapibuilder"
-waf_policy_name          = "DemoAppGW-WAF-Policy"
+# public_ip_name           = "appgw-pip-datapibuilder"      # Uncomment if adding Application Gateway
+# waf_policy_name          = "DemoAppGW-WAF-Policy"         # Uncomment if adding Application Gateway
 
 # SKUs and Sizes
 sql_database_sku         = "S0"

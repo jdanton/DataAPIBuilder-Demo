@@ -65,10 +65,11 @@ output "container_registry_admin_username" {
   sensitive   = true
 }
 
-output "public_ip_address" {
-  description = "Public IP address for the Application Gateway"
-  value       = module.networking.public_ip_address
-}
+# Networking outputs (commented out - for future Application Gateway)
+# output "public_ip_address" {
+#   description = "Public IP address for the Application Gateway"
+#   value       = module.networking.public_ip_address
+# }
 
 output "logic_app_id" {
   description = "Resource ID of the Logic App"
